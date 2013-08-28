@@ -5,7 +5,5 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.5.1"]
                  [com.taoensso/carmine "2.2.0"]
-                 [messaging "0.1.0-SNAPSHOT"]]
-  :plugins [[lein-localrepo "0.5.2"]]
-  :repositories {"local" ~(str (.toURI (java.io.File. "lib")))})
+                 [messaging "0.1.0-SNAPSHOT"]])
 
