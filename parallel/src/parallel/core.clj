@@ -2,14 +2,6 @@
   (:require [taoensso.carmine :as redis])
   (:use (messaging worker)))
 
-(defn new-job [job-id worker batch-size batch-wait-time id-generator]
-  {:tasks-atom (atom {})
-   :job-id job-id
-   :worker worker
-   :batch-size batch-size
-   :batch-wait-time batch-wait-time
-   :id-gen id-generator})
-
 (def ^:const KEY-SEPARATOR "___")
 
 (defn managed-key [job-id task-id]
@@ -53,7 +45,16 @@
 
 (declare run-batch run-task)
 
+(defn new-job [job-id worker batch-size batch-wait-time id-generator]
+  {:tasks-atom (atom {})
+   :job-id job-id
+   :worker worker
+   :batch-size batch-size
+   :batch-wait-time batch-wait-time
+   :id-gen id-generator})
+
 (defn start-job [{:keys [batch-size] :as job} args-seq]
+  (reset! (:tasks-atom job) {})
   (let [args-batches (partition-all batch-size args-seq)]
     (doseq [args-batch args-batches]
       (run-batch job args-batch))))
@@ -64,7 +65,7 @@
   (wait-until-completion (map :proxy (vals @tasks-atom)) batch-wait-time))
 
 (defn run-task [{:keys [job-id worker tasks-atom]} task-id args mark-status]
-  (mark-status job-id task-id)
+  (with-redis (mark-status job-id task-id))
   (let [task-info {:args args
                    :proxy (apply worker [job-id task-id args])}]
     (swap! tasks-atom assoc task-id task-info)))
@@ -97,3 +98,26 @@
          slave-function# (slave-wrapper simple-function#)]
      (defworker ~name [~'job-id ~'task-id ~'worker-args]
        (slave-function# ~'job-id ~'task-id ~'worker-args))))
+
+(defn from-proxies [job proxy-command]
+  (->> @(:tasks-atom job)
+       vals
+       (map :proxy)
+       (map #(% proxy-command))))
+
+(defn values-from [job]
+  (from-proxies job :value))
+
+(defn job-complete? [job]
+  (every? true? (from-proxies job :complete?)))
+
+(defn task-successful? [job-id task-id]
+  (= COMPLETE (status-of job-id task-id)))
+
+(defn job-successful? [job]
+  (->> @(:tasks-atom job)
+       keys
+       (map (partial task-successful? (:job-id job)))
+       (every? true?)))
+
+
