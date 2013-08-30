@@ -52,7 +52,7 @@
        (next-status)
        (update-status-as job-id task-id)))
 
-(declare run-batch run-task)
+(declare run-batch run-task job-successful? recover-job)
 
 (defn new-job [job-id worker batch-size batch-wait-time id-generator]
   {:tasks-atom (atom {})
@@ -66,7 +66,12 @@
   (reset! (:tasks-atom job) {})
   (let [args-batches (partition-all batch-size args-seq)]
     (doseq [args-batch args-batches]
-      (run-batch job args-batch))))
+      (run-batch job args-batch)))
+  (loop [succeed? (job-successful? job)]
+    (if-not succeed?
+      (do
+        (println "Rerunning failed tasks...")
+        (recur (recover-job job))))))
 
 (defn run-batch [{:keys [id-gen tasks-atom batch-wait-time] :as job} args-batch]
   (doseq [args args-batch]
@@ -135,7 +140,8 @@
   (->> @(:tasks-atom job)
        keys
        (map (fn [task-id] {task-id (status-of (:job-id job) task-id)}))
-       (apply merge)))
+       (apply merge)
+       sort))
 
 (defn failure-tasks [job]
   (->> (task-statuses job)
@@ -153,4 +159,5 @@
    (doseq [incomplete-id incomplete-ids]
      (let [args (get-in @tasks-atom [incomplete-id :args])]
        (run-task job incomplete-id args mark-recovery)))
-   (wait-until-completion (map #(get-in @tasks-atom [% :proxy]) incomplete-ids) 10000)))
+   (wait-until-completion (map #(get-in @tasks-atom [% :proxy]) incomplete-ids) 10000))
+  (job-successful? job))

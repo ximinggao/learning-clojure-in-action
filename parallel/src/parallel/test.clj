@@ -1,10 +1,24 @@
 (ns parallel.test
   (:use parallel.core))
 
-(defn fact [n acc]
+(defmulti fact
+  (fn [n acc]
+    (if (< n 21)
+      :long
+      :big-int)))
+
+(defmethod fact :long
+  [n acc]
   (if (= n 0)
     acc
     (recur (dec n) (* n acc))))
+
+(defmethod fact :big-int
+  [n acc]
+  (let [n (bigint n)]
+    (if (= n 0)
+      acc
+      (recur (dec n) (* n acc)))))
 
 (defn throw-exception-randomly []
   (if (> 5 (rand-int 10))
