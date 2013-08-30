@@ -1,6 +1,12 @@
 (ns parallel.core
   (:require [taoensso.carmine :as redis])
-  (:use (messaging worker)))
+  (:use (messaging core worker)))
+
+(defn redis-config []
+  {})
+
+(defmacro with-redis [& body]
+  `(redis/wcar (redis-config) ~@body))
 
 (def ^:const KEY-SEPARATOR "___")
 
@@ -10,10 +16,10 @@
 (def ^:const STATUS-FIELD "status")
 
 (defn update-status-as [job-id task-id status]
-  (redis/hset (managed-key job-id task-id) STATUS-FIELD status))
+  (with-redis (redis/hset (managed-key job-id task-id) STATUS-FIELD status)))
 
 (defn status-of [job-id task-id]
-  (redis/hget (managed-key job-id task-id) STATUS-FIELD))
+  (with-redis (redis/hget (managed-key job-id task-id) STATUS-FIELD)))
 
 (def ^:const DISPATCHED "dispatched")
 (def ^:const INITIAL "initial")
@@ -28,6 +34,9 @@
 
 (defn mark-error [job-id task-id]
   (update-status-as job-id task-id ERROR))
+
+(defn mark-recovery [job-id task-id]
+  (update-status-as job-id task-id RECOVERY))
 
 (def ^:const next-status
   {DISPATCHED INITIAL,
@@ -64,34 +73,36 @@
     (run-task job (apply id-gen args) args mark-dispatched))
   (wait-until-completion (map :proxy (vals @tasks-atom)) batch-wait-time))
 
+(defn should-run? [job-id task-id]
+  (let [status (status-of job-id task-id)]
+    (or (nil? status)
+        (some #{status} [DISPATCHED RECOVERY INITIAL SECONDARY ERROR]))))
+
 (defn run-task [{:keys [job-id worker tasks-atom]} task-id args mark-status]
-  (with-redis (mark-status job-id task-id))
-  (let [task-info {:args args
-                   :proxy (apply worker [job-id task-id args])}]
-    (swap! tasks-atom assoc task-id task-info)))
+  (when (should-run? job-id task-id)
+    (println "Running task [" job-id task-id "]")
+    (mark-status job-id task-id)
+    (let [task-info {:args args
+                     :proxy (apply worker [job-id task-id args])}]
+      (swap! tasks-atom assoc task-id task-info))))
 
-(defn redis-config []
-  {})
-
-(def ^:dynamic *return-value*)
-
-(defmacro with-redis [& body]
-  `(binding [*return-value* nil]
-     (redis/wcar (redis-config)
-                 ~@(drop-last body)
-                 (set! *return-value* ~(last body)))
-     *return-value*))
+(comment (def ^:dynamic *return-value*)
+         (defmacro with-redis [& body]
+           `(binding [*return-value* nil]
+              (redis/wcar (redis-config)
+                          ~@(drop-last body)
+                          (set! *return-value* ~(last body)))
+              *return-value*)))
 
 (defn slave-wrapper [worker-function]
   (fn [job-id task-id worker-args]
-    (with-redis
-      (increment-status job-id task-id)
-      (try
-        (let [return (apply worker-function worker-args)]
-          (increment-status job-id task-id)
-          return)
-        (catch Exception e
-          (mark-error job-id task-id))))))
+    (increment-status job-id task-id)
+    (try
+      (let [return (apply worker-function worker-args)]
+        (increment-status job-id task-id)
+        return)
+      (catch Exception e
+        (mark-error job-id task-id)))))
 
 (defmacro slave-worker [name args & body]
   `(let [simple-function# (fn ~args (do ~@body))
@@ -120,4 +131,26 @@
        (map (partial task-successful? (:job-id job)))
        (every? true?)))
 
+(defn task-statuses [job]
+  (->> @(:tasks-atom job)
+       keys
+       (map (fn [task-id] {task-id (status-of (:job-id job) task-id)}))
+       (apply merge)))
 
+(defn failure-tasks [job]
+  (->> (task-statuses job)
+       (remove #(= COMPLETE (val %)))))
+
+(defmacro with-local-rabbit [& body]
+  `(with-rabbit ["localhost" "guest" "guest"]
+     ~@body))
+
+(defn incomplete-tasks [{:keys [job-id tasks-atom]}]
+  (remove (partial task-successful? job-id) (keys @tasks-atom)))
+
+(defn recover-job [{:keys [tasks-atom] :as job}]
+  (let [incomplete-ids (incomplete-tasks job)]
+   (doseq [incomplete-id incomplete-ids]
+     (let [args (get-in @tasks-atom [incomplete-id :args])]
+       (run-task job incomplete-id args mark-recovery)))
+   (wait-until-completion (map #(get-in @tasks-atom [% :proxy]) incomplete-ids) 10000)))
